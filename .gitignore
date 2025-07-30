@@ -154,3 +154,10 @@ debug*/
 *.gz
 
 cache/
+
+# Ignore files with "orig" in the filename
+*orig*
+
+# IDE-related
+.idea/
+*.iml
