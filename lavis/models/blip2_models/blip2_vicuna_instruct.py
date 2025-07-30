@@ -13,6 +13,12 @@ import transformers
 
 from lavis.common.registry import registry
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from lavis.common.dist_utils import is_dist_avail_and_initialized
+import torch.distributed as dist
+import pickle
+import torch.multiprocessing as mp
 
 @registry.register_model("blip2_vicuna_instruct")
 class Blip2VicunaInstruct(Blip2Base):
@@ -28,7 +34,7 @@ class Blip2VicunaInstruct(Blip2Base):
 
     PRETRAINED_MODEL_CONFIG_DICT = {
         "vicuna7b": "configs/models/blip2/blip2_instruct_vicuna7b.yaml",
-        "vicuna13b": "configs/models/blip2/blip2_instruct_vicuna13b.yaml",
+        "vicuna7b_sgg": "configs/models/blip2/blip2_instruct_vicuna7b_sgg.yaml",
     }
 
     def __init__(
@@ -48,6 +54,7 @@ class Blip2VicunaInstruct(Blip2Base):
         qformer_text_input=True,
     ):
         super().__init__()
+        self.st_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
         transformers_version = version.parse(transformers.__version__)
         assert transformers_version >= version.parse("4.28"), "BLIP-2 Vicuna requires transformers>=4.28"        
         from transformers import LlamaTokenizer
@@ -87,7 +94,7 @@ class Blip2VicunaInstruct(Blip2Base):
         self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
         self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
         self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
-        # self.llm_tokenizer.pad_token = self.llm_tokenizer.unk_token
+        #self.llm_tokenizer.pad_token = self.llm_tokenizer.unk_token
 
         self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
 
@@ -153,7 +160,7 @@ class Blip2VicunaInstruct(Blip2Base):
         if self.qformer_text_input:
             text_Qformer = self.tokenizer(
                 samples["text_input"],
-                padding='longest',
+                padding=True, #'longest',
                 truncation=True,
                 max_length=self.max_txt_len,
                 return_tensors="pt",
@@ -185,7 +192,7 @@ class Blip2VicunaInstruct(Blip2Base):
         text_input_tokens = self.llm_tokenizer(
             samples['text_input'],
             return_tensors="pt",
-            padding="longest",
+            padding=True, #"longest",
             truncation=True,
             max_length=self.max_txt_len,
         ).to(image.device)
@@ -194,7 +201,7 @@ class Blip2VicunaInstruct(Blip2Base):
         text_output_tokens = self.llm_tokenizer(
             [t + self.llm_tokenizer.eos_token for t in samples['text_output']],
             return_tensors="pt",
-            padding="longest",
+            padding=True, #"longest",
             truncation=True,
             max_length=self.max_output_txt_len,
         ).to(image.device)
@@ -249,7 +256,7 @@ class Blip2VicunaInstruct(Blip2Base):
         repetition_penalty=1.5,
         length_penalty=1,
         num_captions=1,
-        temperature=1,
+        temperature=1, split_name=None,
     ):
         self.llm_tokenizer.padding_side = "left"
 
@@ -279,7 +286,7 @@ class Blip2VicunaInstruct(Blip2Base):
 
             text_Qformer = self.tokenizer(
                 prompt,
-                padding='longest',
+                padding=True,
                 truncation=True,
                 max_length=self.max_txt_len,
                 return_tensors="pt",
@@ -345,7 +352,7 @@ class Blip2VicunaInstruct(Blip2Base):
 
         llm_tokens = self.llm_tokenizer(
             prompt,
-            padding="longest",
+            padding=True,
             return_tensors="pt"
         ).to(image.device)
 
@@ -353,27 +360,147 @@ class Blip2VicunaInstruct(Blip2Base):
             inputs_embeds = self.llm_model.get_input_embeddings()(llm_tokens.input_ids)
             inputs_embeds = torch.cat([inputs_llm, inputs_embeds], dim=1)
             attention_mask = torch.cat([atts_llm, llm_tokens.attention_mask], dim=1)
-
+            #outputs = []
+            #for i in range(inputs_embeds.size(0)):
+                    #inputs_embed = inputs_embeds[i].unsqueeze(0)
+                    #attention_mask_ = attention_mask[i].unsqueeze(0)
             outputs = self.llm_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 do_sample=use_nucleus_sampling,
-                top_p=top_p,
+                #top_p=top_p,
                 temperature=temperature,
                 num_beams=num_beams,
                 max_length=max_length,
                 min_length=min_length,
-                # eos_token_id=self.eos_token_id,
+                #eos_token_id=self.eos_token_id,
                 repetition_penalty=repetition_penalty,
                 length_penalty=length_penalty,
                 num_return_sequences=num_captions,
+                output_scores=True,
+                return_dict_in_generate=True,
             )
+                    #outputs.append(outputs_)
+        scores = outputs.sequences_scores
+        if split_name == "pool":
+            num_samples = len(outputs.sequences_scores)
+            sequence_length = len(outputs.scores)
+            num_beams = len(outputs.scores[0]) // num_samples
+            output_scores_reshaped = torch.stack(outputs.scores, dim=0)
+            output_scores_reshaped2 = output_scores_reshaped.permute(1, 0, 2)
+            output_scores_reshaped3 = output_scores_reshaped2.view(num_samples, num_beams,
+                                                                   output_scores_reshaped2.size(1),
+                                                                   output_scores_reshaped2.size(2))
 
-        outputs[outputs == 0] = 2 # convert output id 0 to 2 (eos_token_id)
-        output_text = self.llm_tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        output_text = [text.strip() for text in output_text]
+            def compute_sentence_entropy(logits):
+                # Compute softmax probabilities
+                probabilities = torch.softmax(logits, dim=-1)
+                # Compute entropy for each element in the tensor
+                entropy = -torch.sum(probabilities * torch.log(probabilities + 1e-9), dim=-1)
+                # Aggregate entropy across vocabulary size
+                entropy = torch.mean(entropy, dim=-1)
+                # Average entropy across sequence length
+                entropy = torch.mean(entropy, dim=-1)
+                return entropy
 
-        return output_text
+
+            #softmax_probs = torch.exp(output_scores_reshaped3)
+
+            # Sum probabilities along the word dimension to get sentence-level probabilities
+            #sentence_probs = torch.sum(softmax_probs, axis=3)
+
+            # Sum probabilities along the beam dimension
+            #sentence_probs = torch.sum(sentence_probs, axis=(1,2))
+
+            # Normalize to ensure they are valid probabilities
+            #sentence_probs = sentence_probs / torch.sum(sentence_probs)
+
+            #epsilon = 1e-10
+            #sentence_probs = torch.clamp(sentence_probs, min=epsilon, max=1.0 - epsilon)
+            sentence_entropy = compute_sentence_entropy(output_scores_reshaped3)
+            #gt_embeddings = self.st_model.encode(samples["text_output"])
+            #pred_embeddings = self.st_model.encode(self.llm_tokenizer.batch_decode(outputs.sequences, skip_special_tokens=True))
+
+            """
+            output_scores_reshaped3 = output_scores_reshaped2.view(num_samples, num_beams,
+                                                                   output_scores_reshaped2.size(1),
+                                                                   output_scores_reshaped2.size(2))
+            #output_scores_reshaped = torch.stack(outputs.scores, dim=0).permute(1, 0, 2).view(num_samples, num_beams, -1, -1)
+            softmax_probs = torch.exp(output_scores_reshaped3)
+            softmax_probs[softmax_probs == 0] = 1e-10
+            #entropies = torch.zeros(num_samples, sequence_length)
+            entropies = torch.zeros(num_samples, sequence_length)
+            for t in range(sequence_length):
+                for b in range(num_beams):
+                    entropy = -torch.sum(softmax_probs[:, b, t] * torch.log(softmax_probs[:, b, t]))
+                    entropies[:, t] = entropy
+            # Compute average entropy across samples
+            average_entropy_per_sample = torch.mean(entropies, dim=1)
+            """
+        pred_seq = outputs.sequences
+
+        pred_seq[pred_seq == 0] = 2 # convert output id 0 to 2 (eos_token_id)
+        pred_seq[pred_seq == -1] = 1  # convert improper tokens to ''
+
+        output_text = self.llm_tokenizer.batch_decode(pred_seq, skip_special_tokens=True)
+
+
+        if split_name == "pool":
+            output_text = [text.strip() for text in output_text]
+            gt_embeddings = self.st_model.encode(samples["text_output"], show_progress_bar=False)
+
+            cleaned_output_text = [text.replace(' <s>', '') for text in output_text]
+            pred_embeddings = self.st_model.encode(cleaned_output_text, show_progress_bar=False)
+            similarity_list = []
+            for gt, pred in zip(gt_embeddings, pred_embeddings):
+                similarity_list.append(cosine_similarity([gt], [pred])[0][0])
+            return cleaned_output_text, scores, sentence_entropy, similarity_list
+        if split_name == "val":
+            output_text = [text.strip() for text in output_text]
+            gt_embeddings = self.st_model.encode(samples["text_output"], show_progress_bar=False)
+
+            cleaned_output_text = [text.replace(' <s>', '') for text in output_text]
+            pred_embeddings = self.st_model.encode(cleaned_output_text, show_progress_bar=False)
+            similarity_list = []
+            for gt, pred in zip(gt_embeddings, pred_embeddings):
+                similarity_list.append(cosine_similarity([gt], [pred])[0][0])
+            return cleaned_output_text, scores, similarity_list
+        return output_text, scores
+
+    """
+    import torch
+import torch.nn.functional as F
+
+# Assuming you have num_samples samples and num_beams beams
+num_samples = 18
+num_beams = 5  # Adjust this based on your beam search configuration
+sequence_length = 10  # Adjust this based on your sequence length
+
+# Generate random log-softmax scores (you should replace this with your actual scores)
+log_softmax_scores = torch.rand(num_samples, num_beams, sequence_length, num_embeddings)
+
+# Convert log-softmax scores to probabilities
+softmax_probs = torch.exp(log_softmax_scores)
+
+# Compute entropy for each position in the sequence
+entropies = torch.zeros(num_samples, sequence_length)
+for t in range(sequence_length):
+    for b in range(num_beams):
+        entropy = -torch.sum(softmax_probs[:, b, t] * torch.log(softmax_probs[:, b, t]))
+        entropies[:, t] = entropy
+
+# Sum up entropies across all positions
+total_entropy = torch.sum(entropies)
+
+# Optionally, normalize by dividing by sequence length
+normalized_entropy = total_entropy / sequence_length
+
+# Compute average entropy across samples
+average_entropy = torch.mean(normalized_entropy)
+
+print(f"Average entropy across samples: {average_entropy.item()}")
+
+    """
 
     def predict_answers(
         self,

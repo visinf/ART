@@ -23,7 +23,7 @@ from lavis.common.optims import (
 )
 from lavis.common.registry import registry
 from lavis.common.utils import now
-
+import copy
 # imports modules for registration
 from lavis.datasets.builders import *
 from lavis.models import *
@@ -31,7 +31,8 @@ from lavis.processors import *
 from lavis.runners import *
 from lavis.tasks import *
 
-
+#os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+#-m torch.distributed.run --nproc_per_node=2 --master_port=29501
 def parse_args():
     parser = argparse.ArgumentParser(description="Training")
 
@@ -91,11 +92,16 @@ def main():
 
     task = tasks.setup_task(cfg)
     datasets = task.build_datasets(cfg)
+
+    if cfg.run_cfg.al.al_enabled:
+        datasets['vg_instruct_sgg']['pool'] = copy.deepcopy(datasets['vg_instruct_sgg']['val']) #dummy initialization
+        datasets['vg_instruct_sgg']['train_backup'] = copy.deepcopy(datasets['vg_instruct_sgg']['train'])
     model = task.build_model(cfg)
 
     runner = get_runner_class(cfg)(
         cfg=cfg, job_id=job_id, task=task, model=model, datasets=datasets
     )
+
     runner.train()
 
 

@@ -12,7 +12,7 @@ from lavis.datasets.datasets.aok_vqa_datasets import AOKVQADataset, AOKVQAEvalDa
 from lavis.datasets.datasets.coco_vqa_datasets import COCOVQADataset, COCOVQAEvalDataset
 from lavis.datasets.datasets.vg_vqa_datasets import VGVQADataset
 from lavis.datasets.datasets.gqa_datasets import GQADataset, GQAEvalDataset
-
+from lavis.datasets.datasets.instruct_sgg_datasets import InstructSGGEvalDataset_samples, InstructSGGDataset_samples_balanced
 
 @registry.register_builder("coco_vqa")
 class COCOVQABuilder(BaseDatasetBuilder):
@@ -30,6 +30,11 @@ class VGVQABuilder(BaseDatasetBuilder):
     train_dataset_cls = VGVQADataset
     DATASET_CONFIG_DICT = {"default": "configs/datasets/vg/defaults_vqa.yaml"}
 
+@registry.register_builder("vg_instruct_sgg")
+class InstructSGGBuilder(BaseDatasetBuilder):
+    train_dataset_cls = InstructSGGDataset_samples_balanced
+    eval_dataset_cls = InstructSGGEvalDataset_samples
+    DATASET_CONFIG_DICT = {"default": "configs/datasets/vg/instruct_sgg.yaml"}
 
 @registry.register_builder("ok_vqa")
 class OKVQABuilder(COCOVQABuilder):

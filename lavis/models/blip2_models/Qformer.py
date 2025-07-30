@@ -53,6 +53,8 @@ class BertEmbeddings(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        if config.pad_token_id == 0 or -1:
+            config.pad_token_id = 2
         self.word_embeddings = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id
         )

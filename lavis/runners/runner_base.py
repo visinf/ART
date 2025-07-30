@@ -4,13 +4,16 @@
  SPDX-License-Identifier: BSD-3-Clause
  For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 """
-
 import datetime
 import json
 import logging
 import os
+import random
 import time
 from pathlib import Path
+import pickle
+import fcntl
+import copy
 
 import torch
 import torch.distributed as dist
@@ -21,6 +24,7 @@ from lavis.common.dist_utils import (
     get_world_size,
     is_main_process,
     main_process,
+    is_dist_avail_and_initialized,
 )
 from lavis.common.registry import registry
 from lavis.common.utils import is_url
@@ -33,7 +37,10 @@ from lavis.datasets.datasets.dataloader_utils import (
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.data.dataset import ChainDataset
-
+from rtpt import RTPT
+from lavis.art.art_sampler import ARTSampler
+from lavis.art.utils_distributed import sync_scalar_across_ranks
+from lavis.art.utils import split_train_pool_annotations
 
 @registry.register_runner("runner_base")
 class RunnerBase:
@@ -64,6 +71,63 @@ class RunnerBase:
 
         # self.setup_seeds()
         self.setup_output_dir()
+        random.seed(self.config.run_cfg.seed)
+        self.art_sampler = ARTSampler(self.config.run_cfg)
+
+    def log_active_learning_state(self, output_folder, cur_epoch, al_loop, budget_per_loop, cum_al_budget):
+        al_cfg = self.config.run_cfg.al
+        info = (
+            f"{str(al_cfg)}\n"
+            f"al_loop: {al_loop}\n"
+            f"budget_per_loop: {budget_per_loop}\n"
+            f"cum_al_budget: {cum_al_budget}\n"
+            f"train_stop: {self.train_stop}\n"
+        )
+        with open(os.path.join(output_folder, "evaluation_res.txt"), 'a') as f:
+            f.write(info + "\n")
+
+    def gather_and_merge_distributed_objects(self, local_obj, split_name="pool"):
+        """
+        Gathers and merges distributed objects across all ranks.
+
+        Args:
+            local_obj: The local object to gather (e.g., pool_log or results)
+            mode (str): "pool" or "results" — determines how [0] is merged
+
+        Returns:
+            merged object aggregated from all ranks
+        """
+        assert split_name in {"pool", "val"}, f"Invalid mode: {split_name}"
+
+        world_size = dist.get_world_size()
+        object_list = [None] * world_size
+        dist.all_gather_object(object_list, local_obj)
+
+        for i, obj in enumerate(object_list):
+            if i == 0:
+                merged = copy.deepcopy(obj)
+            else:
+                if split_name == "val":
+                    merged[0].extend(obj[0])  # Merge [0] only in results mode
+
+                for key in obj[1]:
+                    if obj[1][key] is not None:
+                        merged[1][key].extend(obj[1][key])
+
+                for j in range(len(merged[2])):
+                    if j != 1:
+                        merged[2][j].extend(obj[2][j])
+                    else:
+                        merged[2][j] = torch.cat((merged[2][j], obj[2][j]))
+
+        return merged
+
+    def should_run_adaptive_sampling(self, train_stop, cum_al_budget):
+        return (
+                train_stop == 3
+                and cum_al_budget < self.config.run_cfg.al.total_al_budget
+                and self.config.run_cfg.al.al_enabled
+        )
 
     @property
     def device(self):
@@ -89,7 +153,7 @@ class RunnerBase:
             if self.use_distributed:
                 if self._wrapped_model is None:
                     self._wrapped_model = DDP(
-                        self._model, device_ids=[self.config.run_cfg.gpu]
+                        self._model, device_ids=[self.config.run_cfg.gpu], find_unused_parameters=True
                     )
             else:
                 self._wrapped_model = self._model
@@ -102,21 +166,21 @@ class RunnerBase:
         if self._optimizer is None:
             lr_scale = self.config.run_cfg.get("lr_layer_decay", 1)
             weight_decay = self.config.run_cfg.get("weight_decay", 0.05)
-            optim_params = self._model.get_optimizer_params(weight_decay,lr_scale)
+            optim_params = self._model.get_optimizer_params(weight_decay, lr_scale)
 
             num_parameters = 0
             for p_group in optim_params:
                 for p in p_group["params"]:
-                    num_parameters += p.data.nelement()    
-            logging.info("number of trainable parameters: {}".format(num_parameters))      
-                  
+                    num_parameters += p.data.nelement()
+            logging.info("number of trainable parameters: {}".format(num_parameters))
+
             beta2 = self.config.run_cfg.get("beta2", 0.999)
 
             self._optimizer = torch.optim.AdamW(
                 optim_params,
                 lr=float(self.config.run_cfg.init_lr),
                 betas=(0.9, beta2),
-            )    
+            )
         return self._optimizer
 
     @property
@@ -162,7 +226,7 @@ class RunnerBase:
         return self._lr_sched
 
     @property
-    def dataloaders(self) -> dict:
+    def dataloaders(self, al_info=None) -> dict:
         """
         A property to get and create dataloaders by split just in need.
 
@@ -179,7 +243,10 @@ class RunnerBase:
         Returns:
             dict: {split_name: (tuples of) dataloader}
         """
+
         if self._dataloaders is None:
+            print(f"Process {dist.get_rank()} line 216.")
+            #pid = os.fork()
             # reoganize datasets by split and concatenate/chain if necessary
             dataset_ratios = self.config.run_cfg.get("train_dataset_ratios", None)
 
@@ -197,7 +264,7 @@ class RunnerBase:
             # print dataset statistics after concatenation/chaining
             for split_name in self.datasets:
                 if isinstance(self.datasets[split_name], tuple) or isinstance(
-                    self.datasets[split_name], list
+                        self.datasets[split_name], list
                 ):
                     # mixed wds.DataPipeline and torch.utils.data.Dataset
                     num_records = sum(
@@ -327,7 +394,6 @@ class RunnerBase:
     @property
     def train_loader(self):
         train_dataloader = self.dataloaders["train"]
-
         return train_dataloader
 
     def setup_output_dir(self):
@@ -353,59 +419,192 @@ class RunnerBase:
         self.log_config()
 
         # resume from checkpoint if specified
-        if not self.evaluate_only and self.resume_ckpt_path is not None:
-            self._load_checkpoint(self.resume_ckpt_path)
-
-        for cur_epoch in range(self.start_epoch, self.max_epoch):
-            # training phase
-            if not self.evaluate_only:
+        #if not self.evaluate_only and self.resume_ckpt_path is not None:
+        #    self._load_checkpoint(self.resume_ckpt_path)
+        rtpt = RTPT(name_initials='GS', experiment_name='f5_random_balanced_gqa', max_iterations=self.max_epoch)
+        rtpt.start()
+        ###variables
+        self.train_stop = 0
+        self.diversity_enabled_rel = []
+        prev_val = 0
+        curr_val = 100
+        cum_al_budget = 0
+        al_loop = 0
+        best_agg_metric = 0
+        random.seed(self.config.run_cfg.seed)
+        #is_best = True
+        combined_results = []
+        # dict.fromkeys(range(self.start_epoch, self.max_epoch), [])
+        if not self.evaluate_only:
+            for cur_epoch in range(self.start_epoch, self.max_epoch):
+                # training phase
                 logging.info("Start training")
-                # See https://github.com/salesforce/LAVIS/issues/449
-                # if cur_epoch == self.start_epoch:
-                #     self.task.before_training(
-                #         model=self.unwrap_dist_model(self.model),
-                #         dataset=self.datasets["train"],
-                #     )
-                train_stats = self.train_epoch(cur_epoch)
+                if self.config.run_cfg.al.al_enabled:
+                    if cur_epoch == 0:
+                        al_loop = 1
+                        logging.info(f"[AL] Running balanced sampling for epoch {cur_epoch}")
+                        self.al_loop = 1  # start AL loop counter
+
+                        # 1. Deepcopy annotation from the training dataset
+                        data_train = (self.datasets['vg_instruct_sgg']['train']
+                                      if 'vg_instruct_sgg' in self.datasets
+                                      else self.datasets['train'].datasets[0])
+                        annotations = copy.deepcopy(data_train.annotation)
+                        #orig_ann = annotations  # keep original for slicing later
+                        self.art_sampler.orig_ann = self.orig_ann = copy.deepcopy(data_train.annotation)
+                        # 2. Run balanced sampling
+                        sampled_img_rel_idx_dict = self.art_sampler.balanced_sample(
+                            annotations=annotations)
+
+                        # 3. Convert sampled entries to train_idx_dict
+                        train_idx_dict = self.art_sampler._build_train_idx_dict(
+                            sampled_img_rel_idx_dict
+                        )
+
+                        # 4. Split annotation into AL train / pool annotations
+                        al_train_dict, pool_dict = split_train_pool_annotations(self.orig_ann, train_idx_dict)
+
+                        # 5. Update LAVIS datasets
+                        self.update_lavis_datasets(al_train_dict, pool_dict)
+
+                        self.art_sampler._clean_empty_pool_entries(self.datasets['vg_instruct_sgg'])
+
+                    if self.use_distributed:
+                        dist.barrier()
+                    train_stats = self.train_epoch(cur_epoch, al_info=self.config.run_cfg.al)
+                    output_folder = registry.get_path("result_dir")
+                    budget_per_loop = self.art_sampler.budget_per_loop
+                    cum_al_budget = self.art_sampler.cum_al_budget
+                    if is_main_process():
+                        if is_main_process() and cur_epoch == 0:
+                            self.log_active_learning_state(
+                                output_folder=output_folder,
+                                cur_epoch=cur_epoch,
+                                al_loop=al_loop,
+                                budget_per_loop=budget_per_loop,
+                                cum_al_budget=cum_al_budget
+                            )
+
+                else:
+                    train_stats = self.train_epoch(cur_epoch)
                 self.log_stats(split_name="train", stats=train_stats)
+                rtpt.step()
 
-            # evaluation phase
-            if len(self.valid_splits) > 0:
-                for split_name in self.valid_splits:
-                    logging.info("Evaluating on {}.".format(split_name))
 
-                    val_log = self.eval_epoch(
-                        split_name=split_name, cur_epoch=cur_epoch
-                    )
-                    if val_log is not None:
+                # evaluation phase
+                if len(self.valid_splits) > 0 and cur_epoch % 1 == 0:
+                    for split_name in self.valid_splits:
+                        logging.info("Evaluating on {}.".format(split_name))
+                        #if not self.use_distributed:
+                        #    val_log = self.eval_epoch(
+                        #        split_name=split_name, cur_epoch=cur_epoch
+                        #    )
+                        #else:
+                        results = self.eval_epoch(
+                            split_name=split_name, cur_epoch=cur_epoch
+                        )
+                        if self.use_distributed:
+                            results = self.gather_and_merge_distributed_objects(results, split_name=split_name)
+
                         if is_main_process():
+                            #if self.use_distributed:
+                            val_log = self.task.after_evaluation(results, split_name, cur_epoch)
                             assert (
-                                "agg_metrics" in val_log
+                                    "agg_metrics" in val_log
                             ), "No agg_metrics found in validation log."
-
                             agg_metrics = val_log["agg_metrics"]
+                            prev_val = best_agg_metric
                             if agg_metrics > best_agg_metric and split_name == "val":
                                 best_epoch, best_agg_metric = cur_epoch, agg_metrics
-
-                                self._save_checkpoint(cur_epoch, is_best=True)
+                                #self._save_checkpoint(cur_epoch, is_best=True)
 
                             val_log.update({"best_epoch": best_epoch})
                             self.log_stats(val_log, split_name)
+                            if self.config.run_cfg.al.al_enabled:
 
-            else:
-                # if no validation split is provided, we just save the checkpoint at the end of each epoch.
-                if not self.evaluate_only:
-                    self._save_checkpoint(cur_epoch, is_best=False)
+                                curr_val = agg_metrics
+                                progress_diff = (curr_val - prev_val)
+                                self.train_stop = self.train_stop + 1 if progress_diff < 0.01 else 0
 
-            if self.evaluate_only:
-                break
+                            if self.should_run_adaptive_sampling(self.train_stop, cum_al_budget):
+                                al_loop += 1
+                                logging.info(f"[AL] Starting adaptive loop {al_loop}")
 
-            dist.barrier()
+                        if self.use_distributed:
+                            self.train_stop = sync_scalar_across_ranks(self.train_stop)
+                            al_loop = sync_scalar_across_ranks(al_loop)
+                            dist.barrier()
 
+                        if self.train_stop == 3:
+                            pool_log = self.eval_epoch(split_name="pool", cur_epoch=cur_epoch)
+                            if self.use_distributed:
+                                pool_log = self.gather_and_merge_distributed_objects(pool_log, split_name="pool")
+                        if is_main_process() and self.train_stop == 3:
+                            if self.config.run_cfg.al.al_type == 'art':
+                                # Run adaptive sampling to select new samples and move them from pool to train
+                                samples_per_class, self.datasets, current_samples_selected, \
+                                    pos_entropy_count, neg_entropy_head_count, \
+                                    neg_entropy_tail_count, pred_idx_unsure_count = self.art_sampler.adaptive_sample_from_pool(
+                                    pool_log=pool_log,
+                                    val_log=val_log,
+                                    dataset=self.datasets,
+                                    al_loop=al_loop,
+                                    output_folder=registry.get_path("result_dir")
+                                )
+
+                            # === Backing up datasets ===
+                            self._backup_and_switch_datasets(output_folder)
+                            cum_al_budget += self.config.run_cfg.al.al_budget_per_loop
+
+                            # reinitialize the model for from scratch training
+                            prev_val = 0
+                            curr_val = 100
+                            best_agg_metric = 0
+
+                    if self.train_stop == 3:
+                        pretrained_model = "checkpoint to the pretrained model"
+                        self._reinitialize_model_from_checkpoint(output_folder, pretrained_model)
+
+                    # === Logging ===
+                    if is_main_process():
+
+                        al_info = 'al_loop: ' + str(
+                            al_loop) + '\n' + 'budget_per_loop: ' + str(
+                            budget_per_loop) + '\n' + 'cum_al_budget: ' + str(
+                            cum_al_budget) + '\n' + 'train_stop: ' + str(self.train_stop) + '\n' + 'prev_val: ' + str(
+                            prev_val) + '\n' + 'curr_val: ' + str(curr_val) + '\n' + 'progress_diff: ' + str(
+                            progress_diff)
+                        if al_loop > 1 and self.config.run_cfg.al.al_type == 'art':
+                            al_info = al_info + '\n' + 'current_samples_selected: ' + str(
+                                current_samples_selected) + ', pos_entropy_count: ' + str(
+                                pos_entropy_count) + ', neg_entropy_head_count: ' + str(
+                                neg_entropy_head_count) + ', neg_entropy_tail_count: ' + str(
+                                neg_entropy_tail_count) + ', pred_idx_unsure_count: ' + str(pred_idx_unsure_count)
+
+
+
+                        with open(os.path.join(output_folder, "evaluation_res.txt"), 'a') as f:
+                            f.write(al_info + '\n')
+                    dist.barrier()
+                    if cum_al_budget >= self.config.run_cfg.al.total_al_budget and self.train_stop == 3:  # stop training
+                        break
+
+                    if self.use_distributed:
+                        dist.barrier()
         # testing phase
         test_epoch = "best" if len(self.valid_splits) > 0 else cur_epoch
-        self.evaluate(cur_epoch=test_epoch, skip_reload=self.evaluate_only)
-
+        split_name = "val"
+        logging.info("Evaluating on {}.".format(split_name))
+        results = self.eval_epoch(
+            split_name=split_name, cur_epoch=test_epoch, skip_reload=self.evaluate_only
+        )
+        if self.use_distributed:
+            results = self.gather_and_merge_distributed_objects(results, split_name=split_name)
+            dist.barrier()
+        if is_main_process():
+            self.task.after_evaluation(results, split_name, test_epoch)
+        if self.use_distributed:
+            dist.barrier()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         logging.info("Training time {}".format(total_time_str))
@@ -421,10 +620,22 @@ class RunnerBase:
 
             return test_logs
 
-    def train_epoch(self, epoch):
+    def update_lavis_datasets(self, al_train_dict, pool_dict):
+        if 'vg_instruct_sgg' in self.datasets:
+            self.datasets['vg_instruct_sgg']['train'].annotation = al_train_dict
+            self.datasets['vg_instruct_sgg']['train'].key = list(al_train_dict.keys())
+            self.datasets['vg_instruct_sgg']['pool'].annotation = pool_dict
+            self.datasets['vg_instruct_sgg']['pool'].key = list(pool_dict.keys())
+        else:
+            self.datasets['train'].datasets[0].annotation = al_train_dict
+            self.datasets['train'].datasets[0].key = list(al_train_dict.keys())
+            self.datasets['pool'].annotation = pool_dict
+            self.datasets['pool'].key = list(pool_dict.keys())
+
+    def train_epoch(self, epoch, al_info=None):
         # train
         self.model.train()
-
+        # self.epoch = epoch
         return self.task.train_epoch(
             epoch=epoch,
             model=self.model,
@@ -454,6 +665,7 @@ class RunnerBase:
 
         # TODO In validation, you need to compute loss as well as metrics
         # TODO consider moving to model.before_evaluation()
+
         model = self.unwrap_dist_model(self.model)
         if not skip_reload and cur_epoch == "best":
             model = self._reload_best_model(model)
@@ -463,14 +675,17 @@ class RunnerBase:
             model=model,
             dataset=self.datasets[split_name],
         )
-        results = self.task.evaluation(model, data_loader)
-
-        if results is not None:
+        results, gt, pred = self.task.evaluation(model, data_loader, split_name=split_name)
+        results = [results, gt, pred]
+        if results[0] is not None and not self.use_distributed:
             return self.task.after_evaluation(
                 val_result=results,
                 split_name=split_name,
                 epoch=cur_epoch,
             )
+
+        else:
+            return results
 
     def unwrap_dist_model(self, model):
         if self.use_distributed:
@@ -479,13 +694,13 @@ class RunnerBase:
             return model
 
     def create_loaders(
-        self,
-        datasets,
-        num_workers,
-        batch_sizes,
-        is_trains,
-        collate_fns,
-        dataset_ratios=None,
+            self,
+            datasets,
+            num_workers,
+            batch_sizes,
+            is_trains,
+            collate_fns,
+            dataset_ratios=None,
     ):
         """
         Create dataloaders for training and validation.
@@ -494,7 +709,7 @@ class RunnerBase:
         def _create_loader(dataset, num_workers, bsz, is_train, collate_fn):
             # create a single dataloader for each split
             if isinstance(dataset, ChainDataset) or isinstance(
-                dataset, wds.DataPipeline
+                    dataset, wds.DataPipeline
             ):
                 # wds.WebdDataset instance are chained together
                 # webdataset.DataPipeline has its own sampler and collate_fn
@@ -542,7 +757,7 @@ class RunnerBase:
         loaders = []
 
         for dataset, bsz, is_train, collate_fn in zip(
-            datasets, batch_sizes, is_trains, collate_fns
+                datasets, batch_sizes, is_trains, collate_fns
         ):
             if isinstance(dataset, list) or isinstance(dataset, tuple):
                 loader = MultiIterLoader(
@@ -569,10 +784,10 @@ class RunnerBase:
             k: v.requires_grad for (k, v) in model_no_ddp.named_parameters()
         }
         state_dict = model_no_ddp.state_dict()
-        for k in list(state_dict.keys()):
-            if k in param_grad_dic.keys() and not param_grad_dic[k]:
+        #for k in list(state_dict.keys()):
+        #    if k in param_grad_dic.keys() and not param_grad_dic[k]:
                 # delete parameters that do not require gradient
-                del state_dict[k]
+                #del state_dict[k]
 
         save_obj = {
             "model": state_dict,
@@ -632,12 +847,59 @@ class RunnerBase:
         self.start_epoch = checkpoint["epoch"] + 1
         logging.info("Resume checkpoint from {}".format(url_or_filename))
 
+    def _backup_and_switch_datasets(self, output_folder):
+        if isinstance(self.datasets['train'], object):
+            if type(self.datasets['train']).__name__ == 'ConcatDataset':
+                backup = {
+                    'train': self.datasets['train'].datasets[0],
+                    'val': self.datasets['val'],
+                    'test': self.datasets['test'],
+                    'pool': self.datasets['pool'],
+                    'train_backup': self.datasets['train_backup']
+                }
+        else:
+            backup = {
+                'train': self.datasets['train'],
+                'val': self.datasets['val'],
+                'test': self.datasets['test'],
+                'pool': self.datasets['pool'],
+                'train_backup': self.datasets['train_backup']
+            }
+
+        self.datasets = {'vg_instruct_sgg': backup}
+        if len(self.datasets) == 1:
+            new_train = self.datasets['vg_instruct_sgg']['train']
+            self.datasets['vg_instruct_sgg']['train'] = self.datasets['vg_instruct_sgg']['train_backup']
+            self.datasets['vg_instruct_sgg']['train'].annotation = new_train.annotation
+            self.datasets['vg_instruct_sgg']['train'].key = list(
+                self.datasets['vg_instruct_sgg']['train'].annotation.keys())
+        else:
+            self.datasets['train'].datasets[0].key = list(self.datasets['train'].datasets[0].annotation.keys())
+
+        with open(os.path.join(output_folder, f'al_dataset_train.pth'), 'wb') as f:
+            torch.save(self.datasets, f)
+
+    def _reinitialize_model_from_checkpoint(self, output_folder, checkpoint_path):
+        self._dataloaders = None
+        if self.use_distributed and not is_main_process():
+            self.datasets = None
+        dist.barrier()
+        if dist.get_rank() != 0:
+            with open(os.path.join(output_folder, f'al_dataset_train.pth'), 'rb') as f:
+                self.datasets = torch.load(f)
+
+        print(f"Reinitialize the model.....Process {dist.get_rank()} loading pretrained.")
+        self._load_checkpoint(checkpoint_path)
+        self.train_stop = 0
+
     @main_process
-    def log_stats(self, stats, split_name):
+    def log_stats(self, stats, split_name=None):
         if isinstance(stats, dict):
             log_stats = {**{f"{split_name}_{k}": v for k, v in stats.items()}}
             with open(os.path.join(self.output_dir, "log.txt"), "a") as f:
+
                 f.write(json.dumps(log_stats) + "\n")
+
         elif isinstance(stats, list):
             pass
 

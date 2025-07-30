@@ -104,11 +104,17 @@ lavis/configs/models/blip2/blip2_instruct_flant5xl_sgg.yaml
 - `lavis/art/`: ART-specific training and sampling modules
 - `preprocessed_data/`: Preprocessed instruction-tuning data (to be released)
 - `lavis/configs/models/blip2/****_sgg.yaml`: Configuration files for BLIP2-based models
-- `lavis/configs/datasets/vg/****_sgg.yaml`: Dataset split and loader configuratio
+- `lavis/configs/datasets/vg/****_sgg.yaml`: Dataset split and loader configuration
 - `lavis/datasets/datasets/vg/****_sgg_**.py`: Dataset processing logic for training and evaluation
 - `lavis/tasks/captioning.py` and `lavis/tasks/eval_core.py`: Task and evaluation interfaces
 ---
 
+## 📌 TODO
+
+- [ ] Release training checkpoints for **Vicuna** and **Flan-T5** variants  
+- [ ] Upload preprocessed **instruction-tuning** dataset splits
+
+---
 ## 🙏 Acknowledgments
 
 We thank the following open-source projects:

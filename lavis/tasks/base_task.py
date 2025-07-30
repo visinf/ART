@@ -14,7 +14,10 @@ from lavis.common.dist_utils import get_rank, get_world_size, is_main_process, i
 from lavis.common.logger import MetricLogger, SmoothedValue
 from lavis.common.registry import registry
 from lavis.datasets.data_utils import prepare_sample
-
+import gc
+import multiprocessing
+import lavis.tasks as tasks
+import psutil
 
 class BaseTask:
     def __init__(self, **kwargs):
@@ -68,9 +71,15 @@ class BaseTask:
                 loss_dict[k] = v
         return output["loss"], loss_dict
 
+    def reset_predictions(self):
+        self.predictions = None
+        self.dataset = None
+
     def valid_step(self, model, samples):
         raise NotImplementedError
-    
+
+    #def reset_predictions(self):
+    #    raise NotImplementedError
     def before_training(self, model, dataset, **kwargs):
         model.before_training(dataset=dataset, task_type=type(self))
 
@@ -80,27 +89,36 @@ class BaseTask:
     def after_evaluation(self, **kwargs):
         pass
 
+
+
     def inference_step(self):
         raise NotImplementedError
 
-    def evaluation(self, model, data_loader, cuda_enabled=True):
+    def evaluation(self, model, data_loader, cuda_enabled=True, split_name=None):
         metric_logger = MetricLogger(delimiter="  ")
         header = "Evaluation"
         # TODO make it configurable
         print_freq = 10
 
         results = []
-
+        gt_list = []
+        pred_list = []
         for samples in metric_logger.log_every(data_loader, print_freq, header):
+
             samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
+            eval_output, gt, pred = self.valid_step(model=model, samples=samples, split_name=split_name)
 
-            eval_output = self.valid_step(model=model, samples=samples)
-            results.extend(eval_output)
+            #gt_list.append(gt)
+            #pred_list.append(pred)
+            if split_name != 'pool':
+                results.extend(eval_output)
 
-        if is_dist_avail_and_initialized():
-            dist.barrier()
-
-        return results
+        #if is_dist_avail_and_initialized():
+        #    dist.barrier()
+        self.reset_predictions()
+        if split_name == 'pool':
+            results = None
+        return results, gt, pred
 
     def train_epoch(
         self,
@@ -124,7 +142,7 @@ class BaseTask:
             lr_scheduler=lr_scheduler,
             log_freq=log_freq,
             cuda_enabled=cuda_enabled,
-            accum_grad_iters=accum_grad_iters,
+            accum_grad_iters=accum_grad_iters
         )
 
     def train_iters(
@@ -139,7 +157,7 @@ class BaseTask:
         scaler=None,
         cuda_enabled=False,
         log_freq=50,
-        accum_grad_iters=1,
+        accum_grad_iters=1
     ):
         return self._train_inner_loop(
             epoch=epoch,
@@ -152,7 +170,7 @@ class BaseTask:
             lr_scheduler=lr_scheduler,
             log_freq=log_freq,
             cuda_enabled=cuda_enabled,
-            accum_grad_iters=accum_grad_iters,
+            accum_grad_iters=accum_grad_iters
         )
 
     def _train_inner_loop(
@@ -167,7 +185,7 @@ class BaseTask:
         start_iters=None,
         log_freq=50,
         cuda_enabled=False,
-        accum_grad_iters=1,
+        accum_grad_iters=1
     ):
         """
         An inner training loop compatible with both epoch-based and iter-based training.
@@ -185,12 +203,34 @@ class BaseTask:
         metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
         metric_logger.add_meter("loss", SmoothedValue(window_size=1, fmt="{value:.4f}"))
 
+        #print(f"Process {dist.get_rank()} line 203 base_task")
         # if iter-based runner, schedule lr based on inner epoch.
         logging.info(
             "Start training epoch {}, {} iters per inner epoch.".format(
                 epoch, iters_per_epoch
             )
         )
+
+        def get_parent_pid():
+            return os.getpid()
+
+        def get_child_process(parent_pid):
+            parent_process = psutil.Process(parent_pid)
+            for child in parent_process.children(recursive=True):
+                if child.is_running():
+                    return child
+            return None
+
+        def terminate_child_process(child):
+            if child:
+                child.terminate()
+                print("Child process terminated.")
+            else:
+                print("Child process does not exist.")
+
+
+
+        #os.environ["TOKENIZERS_PARALLELISM"] = "True"
         header = "Train: data epoch: [{}]".format(epoch)
         if start_iters is None:
             # epoch-based runner
@@ -206,7 +246,8 @@ class BaseTask:
                 break
 
             samples = next(data_loader)
-
+            os.environ["TOKENIZERS_PARALLELISM"] = "False"
+            #print(f"Process {dist.get_rank()} line 250 base_task")
             samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
             samples.update(
                 {
@@ -240,8 +281,21 @@ class BaseTask:
             metric_logger.update(**loss_dict)
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
+
+
         # after train_epoch()
         # gather the stats from all processes
+        #print(f"Process {dist.get_rank()} line 288 base_task")
+        #parent_pid = get_parent_pid()
+        #print("Parent PID:", parent_pid)
+        #if get_child_process(parent_pid) is not None:
+        #    print("Child process exists.")
+        #    child = get_child_process(parent_pid)
+        #    terminate_child_process(child)
+        #else:
+        #    print("Child process does not exist.")
+        if is_dist_avail_and_initialized():
+            dist.barrier()
         metric_logger.synchronize_between_processes()
         logging.info("Averaged stats: " + str(metric_logger.global_avg()))
         return {

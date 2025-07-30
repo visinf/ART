@@ -18,7 +18,8 @@ from lavis.common.registry import registry
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
 from lavis.models.blip2_models.modeling_t5 import T5Config, T5ForConditionalGeneration
 from transformers.modeling_outputs import BaseModelOutput
-
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 @registry.register_model("blip2_t5_instruct")
 class Blip2T5Instruct(Blip2Base):
@@ -34,7 +35,7 @@ class Blip2T5Instruct(Blip2Base):
 
     PRETRAINED_MODEL_CONFIG_DICT = {
         "flant5xl": "configs/models/blip2/blip2_instruct_flant5xl.yaml",
-        "flant5xxl": "configs/models/blip2/blip2_instruct_flant5xxl.yaml",
+        "flant5xl_sgg": "configs/models/blip2/blip2_instruct_flant5xl_sgg.yaml",
     }
 
     def __init__(
@@ -59,7 +60,7 @@ class Blip2T5Instruct(Blip2Base):
         apply_lemmatizer: when set to True, postprocess predict_answers() result with lemmas.
         """
         super().__init__()
-
+        self.st_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
         self.tokenizer = self.init_tokenizer(truncation_side="left")
 
         self.visual_encoder, self.ln_vision = self.init_vision_encoder(
@@ -288,7 +289,7 @@ class Blip2T5Instruct(Blip2Base):
         repetition_penalty=1.5,
         length_penalty=1.0,
         num_captions=1,
-        temperature=1,
+        temperature=1, split_name=None,
     ):
         if "prompt" in samples.keys():
             prompt = samples["prompt"]
@@ -392,7 +393,7 @@ class Blip2T5Instruct(Blip2Base):
         with self.maybe_autocast(dtype=torch.bfloat16):
             inputs_embeds = self.t5_model.encoder.embed_tokens(input_tokens.input_ids)
             inputs_embeds = torch.cat([inputs_t5, inputs_embeds], dim=1)
-
+            use_nucleus_sampling = True #MY CHANGE
             outputs = self.t5_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=encoder_atts,
@@ -405,12 +406,59 @@ class Blip2T5Instruct(Blip2Base):
                 repetition_penalty=repetition_penalty,
                 length_penalty=length_penalty,
                 num_return_sequences=num_captions,
+                output_scores=True,
+                return_dict_in_generate=True,
             )
-            output_text = self.t5_tokenizer.batch_decode(
-                outputs, skip_special_tokens=True
-            )
+            scores = outputs.sequences_scores
+            if split_name == "pool":
+                num_samples = len(outputs.sequences_scores)
+                sequence_length = len(outputs.scores)
+                num_beams = len(outputs.scores[0]) // num_samples
+                output_scores_reshaped = torch.stack(outputs.scores, dim=0)
+                output_scores_reshaped2 = output_scores_reshaped.permute(1, 0, 2)
+                output_scores_reshaped3 = output_scores_reshaped2.view(num_samples, num_beams,
+                                                                       output_scores_reshaped2.size(1),
+                                                                       output_scores_reshaped2.size(2))
+                def compute_sentence_entropy(logits):
+                    # Compute softmax probabilities
+                    probabilities = torch.softmax(logits, dim=-1)
+                    # Compute entropy for each element in the tensor
+                    entropy = -torch.sum(probabilities * torch.log(probabilities + 1e-9), dim=-1)
+                    # Aggregate entropy across vocabulary size
+                    entropy = torch.mean(entropy, dim=-1)
+                    # Average entropy across sequence length
+                    entropy = torch.mean(entropy, dim=-1)
+                    return entropy
 
-        return output_text
+                sentence_entropy = compute_sentence_entropy(output_scores_reshaped3)
+            pred_seq = outputs.sequences
+
+            pred_seq[pred_seq == 0] = 2  # convert output id 0 to 2 (eos_token_id)
+            pred_seq[pred_seq == -1] = 1  # convert improper tokens to ''
+            output_text = self.t5_tokenizer.batch_decode(
+                pred_seq, skip_special_tokens=True
+            )
+        if split_name == "pool":
+            output_text = [text.strip() for text in output_text]
+            gt_embeddings = self.st_model.encode(samples["text_output"], show_progress_bar=False)
+
+            cleaned_output_text = [text.replace(' <s>', '') for text in output_text]
+            pred_embeddings = self.st_model.encode(cleaned_output_text, show_progress_bar=False)
+            similarity_list = []
+            for gt, pred in zip(gt_embeddings, pred_embeddings):
+                similarity_list.append(cosine_similarity([gt], [pred])[0][0])
+            return cleaned_output_text, scores, sentence_entropy, similarity_list
+        if split_name == "val":
+            output_text = [text.strip() for text in output_text]
+            gt_embeddings = self.st_model.encode(samples["text_output"], show_progress_bar=False)
+
+            cleaned_output_text = [text.replace(' <s>', '') for text in output_text]
+            pred_embeddings = self.st_model.encode(cleaned_output_text, show_progress_bar=False)
+            similarity_list = []
+            for gt, pred in zip(gt_embeddings, pred_embeddings):
+                similarity_list.append(cosine_similarity([gt], [pred])[0][0])
+            return cleaned_output_text, scores, similarity_list
+        return output_text, scores
 
     def predict_answers(
         self,
