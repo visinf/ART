@@ -13,7 +13,7 @@
   "model_type": "bert",
   "num_attention_heads": 12,
   "num_hidden_layers": 12,
-  "pad_token_id": 0,
+  "pad_token_id": 2,
   "add_type_embeddings": false,
   "vocab_size": 30522,
   "encoder_width": 768,

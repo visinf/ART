@@ -1,0 +1,19 @@
+datasets:
+  vg_instruct_sgg: # name of the dataset builder
+    #dataset_card: dataset_card/avsd_dialogue.md # path to the dataset card
+    data_type: images # [images|videos|features] we use features in this case for extracted video features
+
+    build_info:
+      # Be careful not to append minus sign (-) before split to avoid itemizing
+      annotations:
+        train:
+          url: "path to train.pkl"
+          storage: "path to train.pkl"
+        val:
+          url: "path to val.pkl"
+          storage:  "path to val.pkl"
+        test:
+          url:  "path to test.pkl"
+          storage:  "path to test.pkl"
+      images:
+        storage: data/vg/VG_100K/images

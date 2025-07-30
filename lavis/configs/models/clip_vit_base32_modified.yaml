@@ -1,0 +1,86 @@
+ # Copyright (c) 2022, salesforce.com, inc.
+ # All rights reserved.
+ # SPDX-License-Identifier: BSD-3-Clause
+ # For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+
+model:
+  arch: clip
+
+  model_type: ViT-B-32
+#   ['RN50',
+#  'RN50-quickgelu',
+#  'RN50x4',
+#  'RN50x16',
+#  'RN101',
+#  'RN101-quickgelu',
+#  'timm-efficientnetv2_rw_s',
+#  'timm-resnet50d',
+#  'timm-resnetaa50d',
+#  'timm-resnetblur50',
+#  'timm-swin_base_patch4_window7_224',
+#  'timm-vit_base_patch16_224',
+#  'timm-vit_base_patch32_224',
+#  'timm-vit_small_patch16_224',
+#  'ViT-B-16',
+#  'ViT-B-16-plus',
+#  'ViT-B-16-plus-240',
+#  'ViT-B-32',
+#  'ViT-B-32-plus-256',
+#  'ViT-B-32-quickgelu',
+#  'ViT-g-14',
+#  'ViT-H-14',
+#  'ViT-H-16',
+#  'ViT-L-14',
+#  'ViT-L-14-280',
+#  'ViT-L-14-336',
+#  'ViT-L-16',
+#  'ViT-L-16-320']
+
+  pretrained: openai
+  # "openai"
+  # following not available for all models
+  # "yfcc15m"
+  # "cc12m"
+  # "laion400m_e31"
+  # "laion400m_e32"
+  # "laion400m_avg"
+
+preprocess:
+  vis_processor:
+      eval:
+        name: "clip_image_eval"
+        image_size: 224
+
+datasets:
+    vg_instruct_sgg: # name of the dataset builder
+      vis_processor:
+        train:
+          name: "blip2_image_train"
+          image_size: 224
+        eval:
+          name: "blip_image_eval"
+          image_size: 224
+      text_processor:
+        train:
+          name: "blip_caption"
+        eval:
+          name: "blip_caption"
+      images:
+          /storage-01/ml-gsudhakaran/data/vg/VG_100K/images
+
+run:
+  num_workers: 1
+  max_epoch: 60
+  output_dir: "/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/test"  #random_naive_baseline/inference/oiv4"  #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/gqa_train/vg_inference_fixed"  #no_high_level_relation_types"  #pos_associated_neg_random"  #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/ablation/all_negatives"  #oi_test/oiv4/may17_from_scratch_ph_nh_nt_u_e35"  #may20_from_scratch_nh_u"  #gqa_test/al_loop_may10_from_scratch_ph_nh_nt_u_e48_may15"  #oi_test/oiv6/al_loop_may10_from_scratch_ph_nh_nt_u_e48"  #final_from_scratch_random_s42"  #oi_test/oiv4/al_loop_may10_from_scratch_ph_nh_nt_u" #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/gqa_test/al_loop1_balanced_then_random"  #may5_nh_nt_u"   #gqa_test/random" #gqa_test/  al_loop_may11_balanced_random"  #al_loop_may10_ph_nh_nt_u_b5"   #al_loop_full_train_may8_incr_div_ph_nh_nt_u"  #al_loop_full_train_may8_incr_div_ph_nh_nt_u"  #al_loop_full_train_may5_incr_from_scratch_nh_nt_u"  #al_loop_full_train_may5_incr_ph_nh_nt_u"  #al_loop_full_train_may5_incr_from_scratch_nh_nt_u"  #test" #al_loop_full_train_april29_len50_beam5"  #al_loop_full_train_april23_from_scratch_per_loop" #al_loop_full_train_april23_run2" #al_loop_full_train_april23_from_scratch_per_loop" #al_loop_full_train_april5_balanced_incr_ckpt_fixed"  #_all_data_trained_overfitting_model" #test" #al_loop1_balanced_then_random" #al_full_train_bug_fixed" # distributed_train_test" #al_loop_test" #al_loop1_neg_0.2" #mined_negatives_0.2_dist_all_inf_ckt24_1ksamples" #single_instruction"
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: False #True
+
+  al:
+    al_enabled: True
+    total_al_budget: 0.14
+    al_budget_per_loop: 0.02
+    al_type: random  #incremental #random # from_scratch
+    uncertainty_type: entropy
+    num_inf_models: 3 #only if mc.dropout is used during inference

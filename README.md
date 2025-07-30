@@ -1,3 +1,133 @@
+# ART: Adaptive Relation Tuning for Generalized Relation Prediction (ICCV 2025)
+
+<p align="center">
+  <img src="lavis/art/art_teaser.jpg" alt="ART Teaser" width="80%">
+</p>
+
+**1. Boosts Scene Understanding:**
+ART enhances downstream tasks by producing more coherent and informative scene graphs.
+
+**2. Uncovers Semantically Rich Relations:**
+It captures diverse and meaningful relations—including rare and unseen types—that baseline models often miss.
+
+**3. Quantitative Gains in Diversity:**
+ART leads to higher counts of unique and novel relations, verified through comprehensive analysis across benchmarks.
+
+## 🧠 Introduction
+
+Visual Relation Detection (VRD) involves identifying relationships between objects within a scene. However, this task poses significant challenges: VRD models trained solely on relation detection data struggle to generalize beyond their training distribution and are limited in handling rare or unseen relation types, while those leveraging large language models (LLMs) encounter issues such as inaccurate or ambiguous relation inferences and reduced robustness to out-of-distribution datasets.
+
+To address these challenges, we introduce **ART**, an Adaptive Relation Tuning framework. ART utilizes instruction tuning to enhance the generalization capabilities of vision-language models (VLMs) by selecting the most informative instances for fine-tuning. By guiding the VLM to focus on relevant data aspects, ART maintains strong generalizability while improving performance.
+
+
+| Feature              | Description                                                        |
+|----------------------|--------------------------------------------------------------------|
+| 🔄 Adaptive Sampling | A novel adaptive sampling mechanism for instruction tuning set-up  |
+| 🧠 Instruction Tuning | A novel instruction tuning format tailored for relation prediction |
+| 📈 Better Diversity  | Predicts semnatically rich and diverse relation types              |
+| 🧪 Generalization    | Trained on VG and tested on GQA, OpenImages for generalization     |
+
+
+---
+
+## 📂 Datasets
+
+We use the following datasets for training and evaluation:
+
+- **Training Dataset**: VG150 split from [Visual Genome](https://visualgenome.org/)
+- **Evaluation Datasets**: [GQA](https://cs.stanford.edu/people/dorarad/gqa/), [OpenImages V4](https://storage.googleapis.com/openimages/web/index.html), [OpenImages V6](https://storage.googleapis.com/openimages/web/index.html)
+
+The dataset splits are defined in:
+```bash
+lavis/configs/datasets/vg/instruct_sgg.yaml
+```
+
+---
+
+## ⚙️ Installation
+
+1. (Optional) Create a conda environment:
+```bash
+conda create -n lavis python=3.8
+conda activate lavis
+```
+
+2. Install LAVIS from PyPI:
+```bash
+pip install salesforce-lavis
+```
+
+3. Or build from source:
+```bash
+git clone https://github.com/salesforce/LAVIS.git
+cd LAVIS
+pip install -e .
+```
+
+---
+
+## 🏋️ Training
+
+To train ART with the Vicuna model:
+```bash
+CUDA_VISIBLE_DEVICES=4,5 python -m torch.distributed.run \
+--nproc_per_node=2 --master_port=29508 \
+train.py --cfg-path lavis/configs/models/blip2/blip2_instruct_vicuna7b_sgg.yaml
+```
+
+---
+
+## 🔍 Inference
+
+1. Set `evaluate=True` in the model config.
+2. Choose dataset with `dataset_name=vg/gqa/oi`.
+3. Update dataset splits in the config YAML.
+
+---
+
+## 🧩 Model Configurations
+
+- **Vicuna Variant**:
+```bash
+lavis/configs/models/blip2/blip2_instruct_vicuna7b_sgg.yaml
+```
+- **Flant Variant**:
+```bash
+lavis/configs/models/blip2/blip2_instruct_flant5xl_sgg.yaml
+```
+
+---
+
+
+## 📁 Project Structure
+- `lavis/runner_base.py`:  Modified runner for distributed relation tuning and adaptive sampling
+- `lavis/art/`: ART-specific training and sampling modules
+- `preprocessed_data/`: Preprocessed instruction-tuning data (to be released)
+- `lavis/configs/models/blip2/****_sgg.yaml`: Configuration files for BLIP2-based models
+- `lavis/configs/datasets/vg/****_sgg.yaml`: Dataset split and loader configuratio
+- `lavis/datasets/datasets/vg/****_sgg_**.py`: Dataset processing logic for training and evaluation
+- `lavis/tasks/captioning.py` and `lavis/tasks/eval_core.py`: Task and evaluation interfaces
+---
+
+## 🙏 Acknowledgments
+
+We thank the following open-source projects:
+
+- [LAVIS](https://github.com/salesforce/LAVIS) for the vision-language infrastructure
+- [Scene Graph Benchmark](https://github.com/KaihuaTang/Scene-Graph-Benchmark.pytorch)
+- [PySGG](https://github.com/SHTUPLUS/PySGG) for evaluation scripts
+
+---
+
+## 🔗 Reference: LAVIS README
+
+This project builds upon the LAVIS framework. For full documentation and additional tasks (captioning, VQA, retrieval), refer to:
+
+👉 https://github.com/salesforce/LAVIS
+
+<details>
+<summary>Click to expand the original LAVIS README</summary>
+
 <p align="center">
     <br>
     <img src="docs/_static/logo_final.png" width="400"/>
@@ -323,3 +453,16 @@ If you have any questions, comments or suggestions, please do not hesitate to co
 
 ## License
 [BSD 3-Clause License](LICENSE.txt)
+
+
+</details>
+
+---
+
+## 📜 License
+
+This work is licensed under the BSD-3-Clause License due to its use of code from the LAVIS repository [LICENSE.txt](https://github.com/salesforce/LAVIS/blob/main/LICENSE.txt)
+
+---
+
+Feel free to cite our ICCV 2025 paper or reach out for collaboration!

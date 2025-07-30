@@ -1,0 +1,86 @@
+ # Copyright (c) 2022, salesforce.com, inc.
+ # All rights reserved.
+ # SPDX-License-Identifier: BSD-3-Clause
+ # For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+
+model:
+  arch: alpro_qa
+  num_classes: 2423
+
+  load_finetuned: True
+
+  finetuned: "https://storage.googleapis.com/sfr-vision-language-research/LAVIS/models/ALPRO/alpro_msvd_qa.pth"
+  pretrained: "https://storage.googleapis.com/sfr-vision-language-research/LAVIS/models/ALPRO/alpro_pretrain.pt"
+
+  timesformer:
+    n_frms: 16
+    image_size: 224
+
+    patch_size: 16
+    attn_drop_rate: 0.
+    drop_rate: 0.
+    drop_path_rate: 0.1
+    use_grad_ckpt: True
+    ckpt_layer: 12
+
+  # bert config
+  med_config_path: "configs/models/bert_config_alpro.json"
+
+run:
+  task: captioning
+  # optimizer
+  lr_sched: "linear_warmup_step_lr"
+  # lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 1e-3
+  min_lr: 1e-6
+  warmup_lr: 1e-6
+  lr_decay_rate: 0.9
+  resume_ckpt_path: None
+  weight_decay: 0.05
+
+  batch_size_train: 1
+  batch_size_eval: 1
+
+  warmup_steps: 3000
+  max_len: 20 #15 #20 #50 #25 #50
+  min_len: 3
+  num_beams: 3
+  num_captions: 1
+  length_penalty: 1
+  seed: 42
+  evaluate: True
+  train_splits: [ "train" ]
+  valid_splits: [ "val" ]
+  #test_splits: ['test']
+  num_workers: 1
+  max_epoch: 60
+  output_dir: "/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/random_naive_baseline/inference/oiv4"  #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/gqa_train/vg_inference_fixed"  #no_high_level_relation_types"  #pos_associated_neg_random"  #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/ablation/all_negatives"  #oi_test/oiv4/may17_from_scratch_ph_nh_nt_u_e35"  #may20_from_scratch_nh_u"  #gqa_test/al_loop_may10_from_scratch_ph_nh_nt_u_e48_may15"  #oi_test/oiv6/al_loop_may10_from_scratch_ph_nh_nt_u_e48"  #final_from_scratch_random_s42"  #oi_test/oiv4/al_loop_may10_from_scratch_ph_nh_nt_u" #"/storage-01/ml-gsudhakaran/sg/SceneGraphAnything/model_checkpoints/gqa_test/al_loop1_balanced_then_random"  #may5_nh_nt_u"   #gqa_test/random" #gqa_test/  al_loop_may11_balanced_random"  #al_loop_may10_ph_nh_nt_u_b5"   #al_loop_full_train_may8_incr_div_ph_nh_nt_u"  #al_loop_full_train_may8_incr_div_ph_nh_nt_u"  #al_loop_full_train_may5_incr_from_scratch_nh_nt_u"  #al_loop_full_train_may5_incr_ph_nh_nt_u"  #al_loop_full_train_may5_incr_from_scratch_nh_nt_u"  #test" #al_loop_full_train_april29_len50_beam5"  #al_loop_full_train_april23_from_scratch_per_loop" #al_loop_full_train_april23_run2" #al_loop_full_train_april23_from_scratch_per_loop" #al_loop_full_train_april5_balanced_incr_ckpt_fixed"  #_all_data_trained_overfitting_model" #test" #al_loop1_balanced_then_random" #al_full_train_bug_fixed" # distributed_train_test" #al_loop_test" #al_loop1_neg_0.2" #mined_negatives_0.2_dist_all_inf_ckt24_1ksamples" #single_instruction"
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: False #True
+
+  al:
+    al_enabled: True
+    total_al_budget: 0.14
+    al_budget_per_loop: 0.02
+    al_type: random  #incremental #random # from_scratch
+    uncertainty_type: entropy
+    num_inf_models: 3 #only if mc.dropout is used during inference
+datasets:
+  vis_processor:
+      train:
+        name: "alpro_video_train"
+        n_frms: 16
+        image_size: 224
+      eval:
+        name: "alpro_video_eval"
+        n_frms: 16
+        image_size: 224
+  text_processor:
+      train:
+        name: "blip_caption"
+      eval:
+        name: "blip_caption"
+  images:
+    /storage-01/ml-gsudhakaran/data/vg/VG_100K/images

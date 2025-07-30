@@ -1,0 +1,87 @@
+ # Copyright (c) 2022, salesforce.com, inc.
+ # All rights reserved.
+ # SPDX-License-Identifier: BSD-3-Clause
+ # For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
+
+model:
+  arch: blip2_t5_instruct
+  model_type: flant5xl_sgg
+  load_finetuned: False
+  load_pretrained: True
+
+  pretrained: "https://storage.googleapis.com/sfr-vision-language-research/LAVIS/models/InstructBLIP/instruct_blip_flanxl_trimmed.pth"
+  finetuned: ""
+
+  # vit encoder
+  image_size: 224
+  drop_path_rate: 0
+  use_grad_checkpoint: False
+  vit_precision: "fp16"
+  freeze_vit: True
+
+  # Q-Former
+  num_query_token: 32
+
+  # T5
+  t5_model: "google/flan-t5-xl"
+
+  # generation configs
+  prompt: ""
+
+run:
+  task: captioning
+  # optimizer
+  lr_sched: "linear_warmup_step_lr"
+  # lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 1e-3
+  min_lr: 1e-6
+  warmup_lr: 1e-6
+  lr_decay_rate: 0.9
+  resume_ckpt_path: None
+  weight_decay: 0.05
+
+  batch_size_train: 1
+  batch_size_eval: 1
+
+  warmup_steps: 3000
+  max_len: 20
+  min_len: 3
+  num_beams: 3
+  num_captions: 1
+  length_penalty: 1
+  seed: 42
+  evaluate: True
+  train_splits: [ "train" ]
+  valid_splits: ["val"]
+  #test_splits: ['test']
+  num_workers: 1
+  max_epoch: 60
+  output_dir: "path to output folder"
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: False #True
+
+  al:
+    al_enabled: True
+    total_al_budget: 0.2
+    al_budget_per_loop: 0.02
+    al_type: 'art'
+    uncertainty_type: entropy
+    num_inf_models: 3 #only if mc.dropout is used during inference
+
+datasets:
+    vg_instruct_sgg: # name of the dataset builder
+      vis_processor:
+        train:
+          name: "blip2_image_train"
+          image_size: 224
+        eval:
+          name: "blip_image_eval"
+          image_size: 224
+      text_processor:
+        train:
+          name: "blip_caption"
+        eval:
+          name: "blip_caption"
+      images: data/vg/VG_100K/images
