@@ -471,4 +471,18 @@ This work is licensed under the BSD-3-Clause License due to its use of code from
 
 ---
 
-Feel free to cite our ICCV 2025 paper or reach out for collaboration!
+## 📖 Cite Us
+
+If you use ART in your research, please cite:
+
+```bibtex
+@article{sudhakaran2025art,
+  title         = {ART: Adaptive Relation Tuning for Generalized Relation Prediction},
+  author        = {Sudhakaran, Gopika and Shindo, Hikaru and Schramowski, Patrick and
+                   Schaub-Meyer, Simone and Kersting, Kristian and Roth, Stefan},
+  journal       = {arXiv preprint arXiv:2507.23543},
+  year          = {2025},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV},
+  url           = {https://arxiv.org/abs/2507.23543}
+}
